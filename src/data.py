@@ -1,175 +1,96 @@
-"""data.py - Uplift modeling data loading and preparation.
+from __future__ import annotations
+"""Synthetic marketing-campaign A/B test data for UpliftIQ (Bain & Co).
 
-Supports:
-1. Hillstrom Email Marketing Dataset (the gold standard for uplift modeling)
-2. Synthetic uplift data with known ground truth
-
-Mathematical foundations:
-- Potential outcomes framework: Y_i(1), Y_i(0) = outcomes under treatment/control
-- Individual Treatment Effect (ITE): τ_i = Y_i(1) - Y_i(0) (fundamentally unobservable!)
-- Average Treatment Effect (ATE): τ = E[Y(1) - Y(0)] = E[Y|T=1] - E[Y|T=0]
-- Conditional Average Treatment Effect (CATE): τ(x) = E[Y(1) - Y(0) | X=x]
-
-Key insight: We can only observe ONE potential outcome per unit (fundamental problem of causal inference).
-Randomized experiments ensure P(T|X) = P(T), making ATE identifiable.
+Each row is a CAMPAIGN × AUDIENCE-CELL exposure (not a customer-tenure record).
+A randomized treatment flag W (~50%) toggles whether the cell received the new
+campaign variant. Outcomes follow the potential-outcomes model with a
+HETEROGENEOUS CATE that depends on campaign/creative/audience features — e.g.
+highly personalized creatives in low-competition markets produce large uplift,
+while high-frequency (saturated) audiences show diminishing or negative returns.
 """
-
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from typing import Dict, Optional
+
+FEATURE_NAMES = [
+    "campaign_segment", "historical_channel_ctr", "ad_intensity",
+    "market_competition_index", "audience_segment", "device_mix_share",
+    "time_since_last_campaign_days", "offer_value",
+    "creative_personalization_score", "reach_frequency", "region_index",
+]
+CATEGORICAL_FEATURES = ["campaign_segment", "audience_segment", "region_index"]
+NUMERICAL_FEATURES = [c for c in FEATURE_NAMES if c not in CATEGORICAL_FEATURES]
+TREATMENT_COL = "treatment"
+TARGET_NAME = "conversion"
+
+_AUD_MAP = {"new": 0.60, "active": 0.30, "dormant": 0.80, "at-risk": 0.90}
+_SEG_MAP = {"acquisition": 0.00, "retention": 0.10, "winback": 0.60, "cross-sell": 0.30}
+_REG_MAP = {"metro": 0.80, "tier1": 0.60, "tier2": 0.40, "rural": 0.20}
 
 
-def load_hillstrom(csv_path: Optional[str] = None) -> Dict:
-    """Load the Hillstrom Email Marketing Dataset.
-
-    This is a randomized controlled experiment:
-    - 64,000 customers
-    - 3 treatment arms: Control, Men's Email, Women's Email
-    - Treatment was randomly assigned (no confounding)
-    - Outcomes: visit, conversion, spend
-
-    The dataset is the gold standard for uplift modeling because:
-    1. True randomized experiment (ATE is identifiable)
-    2. Multiple outcome types (binary + continuous)
-    3. Real business context (email marketing targeting)
-    """
-    if csv_path is None:
-        csv_path = Path(__file__).parent.parent / "data" / "raw" / "hillstrom.csv"
-    else:
-        csv_path = Path(csv_path)
-
-    try:
-        df = pd.read_csv(csv_path)
-        return _process_hillstrom(df)
-    except FileNotFoundError:
-        return _download_hillstrom(csv_path)
-
-
-def _download_hillstrom(csv_path: Path) -> Dict:
-    """Download Hillstrom dataset from public URL if not found locally."""
-    import urllib.request
-
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    url = "http://www.minethatdata.com/Kevin_Hillstrom_MineThatData_E-MailAnalytics_DataMiningChallenge_2008.03.20.csv"
-
-    try:
-        urllib.request.urlretrieve(url, str(csv_path))
-        df = pd.read_csv(csv_path)
-        return _process_hillstrom(df)
-    except Exception:
-        return make_synthetic_uplift(n=32000)
-
-
-def _process_hillstrom(df: pd.DataFrame) -> Dict:
-    """Process raw Hillstrom data."""
-    df = df.copy()
-
-    # Treatment encoding: 0=control, 1=men's email, 2=women's email
-    if "treatment" in df.columns:
-        treatment = df["treatment"].values
-    else:
-        treatment = np.zeros(len(df), dtype=int)
-
-    # Features
-    feature_cols = []
-    for col in ["recency", "history", "mens", "womens", "newbie"]:
-        if col in df.columns:
-            feature_cols.append(col)
-
-    # Encode categorical features
-    if "history_segment" in df.columns:
-        for seg in df["history_segment"].unique():
-            df[f"seg_{seg}"] = (df["history_segment"] == seg).astype(int)
-            feature_cols.append(f"seg_{seg}")
-
-    if "zip_code" in df.columns:
-        for zc in df["zip_code"].unique():
-            df[f"zip_{zc}"] = (df["zip_code"] == zc).astype(int)
-            feature_cols.append(f"zip_{zc}")
-
-    if "channel" in df.columns:
-        for ch in df["channel"].unique():
-            df[f"ch_{ch}"] = (df["channel"] == ch).astype(int)
-            feature_cols.append(f"ch_{ch}")
-
-    # Target: conversion (binary)
-    target = "conversion" if "conversion" in df.columns else "visit"
-    y = df[target].values.astype(np.int64)
-
-    X = df[feature_cols].values.astype(np.float64)
-
-    return {
-        "df": df,
-        "X": X,
-        "y": y,
-        "treatment": treatment.astype(np.int64),
-        "features": feature_cols,
-        "n_samples": len(y),
-        "treatment_names": ["Control", "Men's Email", "Women's Email"],
-        "n_treatments": 3,
-        "outcome_name": target,
-    }
-
-
-def make_synthetic_uplift(n: int = 32000, seed: int = 42) -> Dict:
-    """Generate synthetic uplift data with known ground truth.
-
-    Data generating process:
-    - X ~ N(0, I_d) with d=10 features
-    - Treatment T ~ Uniform({0, 1, 2}) (3 arms)
-    - True CATE: τ(x) = β^T x + interaction terms
-    - Outcome: y = μ(x) + τ(x) · 1(T=1) + noise
-
-    This allows us to evaluate uplift models against known ground truth.
-    """
+def make_synthetic(n: int = 10000, seed: int = 42) -> dict:
     rng = np.random.default_rng(seed)
-    d = 10
-    X = rng.normal(size=(n, d))
 
-    # True treatment effect function
-    beta_treatment = rng.normal(0, 0.3, d)
-    tau = X @ beta_treatment + 0.5 * X[:, 0] * X[:, 1]  # linear + interaction
+    campaign_segment = rng.choice(["acquisition", "retention", "winback", "cross-sell"],
+                                  n, p=[0.30, 0.30, 0.20, 0.20])
+    historical_channel_ctr = rng.beta(2, 80, n).round(4)
+    ad_intensity = rng.lognormal(8.0, 0.6, n).clip(500, 200_000).astype(int)
+    market_competition = rng.beta(2, 3, n).round(3)
+    audience_segment = rng.choice(["new", "active", "dormant", "at-risk"],
+                                  n, p=[0.25, 0.35, 0.25, 0.15])
+    device_mix = rng.beta(5, 3, n).round(3)
+    time_since_last = rng.exponential(20, n).clip(0, 120).astype(int)
+    offer_value = rng.lognormal(2.8, 0.5, n).clip(5, 120).round(2)
+    creative_pers = rng.beta(3, 2, n).round(3)
+    reach_freq = rng.gamma(2.0, 1.2, n).clip(1, 12).round(2)
+    region = rng.choice(["metro", "tier1", "tier2", "rural"], n, p=[0.4, 0.3, 0.2, 0.1])
 
-    # Treatment assignment (randomized)
-    treatment = rng.choice(3, size=n)
+    w = rng.binomial(1, 0.5, n)
 
-    # Outcome: base rate + treatment effect + noise
-    mu = 0.1 + 0.05 * X[:, 0]  # base propensity
-    noise = rng.normal(0, 0.1, n)
-    y_continuous = mu + tau * (treatment == 1).astype(float) + noise
-    y = (y_continuous > np.median(y_continuous)).astype(int)
+    # normalized covariates for the data-generating process
+    hctr = historical_channel_ctr
+    intensity = np.log(ad_intensity) / np.log(200_000)
+    comp = market_competition
+    aud = np.array([_AUD_MAP[a] for a in audience_segment], dtype=float)
+    tsl = np.clip(time_since_last / 120.0, 0, 1)
+    offer = np.log(offer_value) / np.log(120.0)
+    cpers = creative_pers
+    rf = np.clip(reach_freq / 12.0, 0, 1)
+    seg = np.array([_SEG_MAP[s] for s in campaign_segment], dtype=float)
+    reg = np.array([_REG_MAP[r] for r in region], dtype=float)
 
-    features = [f"feat_{i}" for i in range(d)]
+    # baseline (control) conversion probability
+    logit0 = (-2.8 + 6.0 * hctr + 0.6 * intensity + 0.5 * aud + 0.4 * reg
+              + 0.3 * cpers + rng.normal(0, 0.25, n))
+    mu0 = 1.0 / (1.0 + np.exp(-logit0))
 
+    # heterogeneous CATE: personalization & low competition help; saturation hurts
+    tau = (0.02 + 0.10 * seg + 0.15 * cpers - 0.10 * comp + 0.10 * aud
+           + 0.06 * offer - 0.04 * rf - 0.03 * tsl
+           + rng.normal(0, 0.015, n))
+    tau = np.clip(tau, -0.05, 0.40)
+    mu1 = np.clip(mu0 + tau, 0.0, 1.0)
+
+    y0 = rng.binomial(1, mu0).astype(float)
+    y1 = rng.binomial(1, mu1).astype(float)
+    y = np.where(w == 1, y1, y0).astype(float)
+
+    df = pd.DataFrame({
+        "campaign_segment": campaign_segment, "historical_channel_ctr": historical_channel_ctr,
+        "ad_intensity": ad_intensity, "market_competition_index": market_competition,
+        "audience_segment": audience_segment, "device_mix_share": device_mix,
+        "time_since_last_campaign_days": time_since_last, "offer_value": offer_value,
+        "creative_personalization_score": creative_pers, "reach_frequency": reach_freq,
+        "region_index": region, TREATMENT_COL: w, TARGET_NAME: y, "true_tau": tau,
+    })
+    X = df[FEATURE_NAMES].copy()
+    treated = w == 1
+    ate = float(y[treated].mean() - y[~treated].mean()) if treated.any() and (~treated).any() else 0.0
     return {
-        "df": None,
-        "X": X,
-        "y": y,
-        "treatment": treatment,
-        "features": features,
-        "n_samples": n,
-        "treatment_names": ["Control", "Treatment A", "Treatment B"],
-        "n_treatments": 3,
-        "outcome_name": "conversion",
-        "true_cate": tau,
-    }
-
-
-def prepare_binary_uplift(data: Dict, treatment_col: int = 1) -> Dict:
-    """Prepare binary treatment/control data for uplift modeling.
-
-    Converts multi-arm experiment to binary: treatment_col vs control (arm 0).
-    Only uses samples from these two arms.
-    """
-    mask = np.isin(data["treatment"], [0, treatment_col])
-    treatment_binary = (data["treatment"][mask] == treatment_col).astype(int)
-
-    return {
-        "X": data["X"][mask],
-        "y": data["y"][mask],
-        "treatment": treatment_binary if isinstance(treatment_binary, np.ndarray) else treatment_binary.values,
-        "features": data["features"],
-        "n_samples": int(mask.sum()),
-        "treatment_names": [data["treatment_names"][0], data["treatment_names"][treatment_col]],
+        "X": X, "y": y, "treatment": w.astype(float), "true_tau": tau.astype(float),
+        "df": df, "features": list(FEATURE_NAMES),
+        "categorical_features": list(CATEGORICAL_FEATURES),
+        "numerical_features": list(NUMERICAL_FEATURES),
+        "treatment_col": TREATMENT_COL, "target_name": TARGET_NAME,
+        "n_samples": int(n), "positive_rate": float(y.mean()),
+        "treatment_rate": float(w.mean()), "ate": ate,
     }

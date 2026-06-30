@@ -1,52 +1,38 @@
-"""train.py - build (synthetic) data, train, evaluate, persist. Runs with no downloads."""
 from __future__ import annotations
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
-import numpy as np
-from src.data import make_synthetic_uplift
-from src.model import SLearner, TLearner, XLearner, compute_ate, compute_qini
-from src.evaluate import save_metrics
+import argparse
+
+from src.data import make_synthetic
+from src.model import fit_causal_models
+from src.evaluate import causal_report, save_metrics, print_report
 from src.persist import save_model
 
 
-def main() -> None:
-    data = make_synthetic_uplift(n=5000, seed=42)
-    X, treatment, y = data["X"], data["treatment"], data["y"]
+def main():
+    p = argparse.ArgumentParser(description="Train UpliftIQ causal effect estimators")
+    p.add_argument("--n", type=int, default=10000)
+    p.add_argument("--seed", type=int, default=42)
+    a = p.parse_args()
 
-    ate = compute_ate(y, treatment)
-    print(f"ATE = {ate['ate']:.4f} (CI: [{ate['ci_lower']:.4f}, {ate['ci_upper']:.4f}])")
+    data = make_synthetic(n=a.n, seed=a.seed)
+    print(f"{data['n_samples']:,} campaign-cells | conversion={data['positive_rate']:.2%} "
+          f"| treatment={data['treatment_rate']:.2%} | observed ATE={data['ate']:.4f}")
 
-    models = {
-        "S_Learner": SLearner(),
-        "T_Learner": TLearner(),
-        "X_Learner": XLearner(),
-    }
-    results = {}
-    for name, model in models.items():
-        model.fit(X, treatment, y)
-        cate = model.predict_cate(X)
-        _, _, qini = compute_qini(y, treatment, cate)
-        results[name] = {"qini": qini, "model": model, "cate": cate}
-        print(f"  {name:12s} Qini = {qini:.4f}")
+    fit = fit_causal_models(data, seed=a.seed)
+    report = causal_report(fit)
+    print_report(report)
 
-    best = max(results, key=lambda n: results[n]["qini"])
     save_model({
-        "models": {n: results[n]["model"] for n in results},
-        "cate_scores": {n: results[n]["cate"] for n in results},
-        "best": best,
-        "ate": ate,
+        "estimators": fit["estimators"],
+        "features": fit["features"],
+        "categorical_features": fit["categorical_features"],
+        "numerical_features": fit["numerical_features"],
     })
-    save_metrics({
-        "ate": ate,
-        "qini": {n: results[n]["qini"] for n in results},
-        "best_model": best,
-        "n_samples": len(X),
-        "n_features": X.shape[1],
-    })
-    print(f"\nBest model: {best} (Qini={results[best]['qini']:.4f})")
-    print("Saved.")
+    save_metrics(report, path="models/metrics.json")
+    print("\nSaved models/model.pkl and models/metrics.json")
 
 
 if __name__ == "__main__":

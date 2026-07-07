@@ -1,21 +1,27 @@
 # UpliftIQ — Campaign Causal Uplift
 
-Estimate the **incremental (causal) lift** of a marketing-campaign variant at the
-audience-cell level and decide *which cells to target*. Like a sibling uplift
-project, this is causal inference — not classification — but it uses a **different
-data domain** (campaign/creative/audience features rather than customer tenure) and
-a **different estimator family** (X-learner + two-model causal forest) with a
-**different metric set** (normalized Qini, treatment-effect distribution stats,
-uplift decile lift).
+Estimates the **incremental (causal) lift** of a marketing campaign per customer and
+decides *who is worth targeting*. This is causal inference, not classification: the
+question is not "who will convert" but "whose behaviour the campaign actually changes."
+
+## Data
+
+The primary dataset is the real **Hillstrom e-mail experiment** (64,000 customers,
+randomized e-mail vs holdout — the standard public uplift benchmark). It downloads
+once and is cached under `data/`. Treatment is "received an e-mail," outcome is a
+site visit within two weeks.
+
+Measured on the held-out quarter: **observed ATE ≈ +5.7pp visit rate**, mean
+predicted CATE ≈ 0.06 across all three estimators, normalized Qini ≈ 0.0015–0.0016
+(positive ⇒ beats random targeting; small because e-mail lifts nearly everyone, so
+ranking who to target is genuinely hard on this dataset — an honest result, not a
+model failure).
+
+A synthetic campaign A/B generator with a *known* heterogeneous CATE is kept
+alongside (`--synthetic` / sidebar toggle), because only simulated data lets you
+check estimators against the true effect (Spearman vs oracle tau).
 
 ## Methodology
-
-### Data model
-Each row is a campaign × audience-cell exposure with a randomized treatment `W`
-(~50%). Potential outcomes `y0 ~ Bernoulli(mu0(x))`, `y1 ~ Bernoulli(mu1(x))` with
-`mu1 = clip(mu0 + tau(x), 0, 1)`. The CATE `tau(x)` is heterogeneous: personalized
-creatives in low-competition markets lift strongly; high-frequency (saturated)
-audiences show diminishing/negative returns.
 
 ### Estimators
 - **X-learner** (Künzel et al. 2019) — fit `mu0`, `mu1`; impute `D1 = Y − mu0(X)`
@@ -36,7 +42,7 @@ audiences show diminishing/negative returns.
 
 ## Project layout
 ```
-src/data.py      synthetic campaign A/B data with heterogeneous CATE
+src/data.py      Hillstrom loader (cached download) + synthetic A/B generator
 src/model.py     X-learner, T-learner, TwoModelCausalForest (ColumnTransformer encoding)
 src/core.py      qini_curve, normalized_qini, uplift_decile_lift, TE distribution stats
 src/evaluate.py  held-out causal report + JSON metrics
@@ -46,9 +52,10 @@ app.py           Streamlit dashboard
 
 ## Run
 ```sh
-make install
-make train
-make test
+pip install -r requirements.txt
+python train.py              # Hillstrom (downloads ~5 MB once)
+python train.py --synthetic  # oracle-CATE simulation instead
+pytest -q
 streamlit run app.py
 ```
 

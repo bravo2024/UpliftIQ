@@ -16,7 +16,7 @@ import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 
-from src.data import make_synthetic
+from src.data import load_hillstrom, make_synthetic
 from src.model import fit_causal_models
 from src.evaluate import causal_report, qini_curves_for_plot
 from src.core import treatment_effect_distribution_stats
@@ -33,9 +33,16 @@ COLORS = {"X-learner": "#10b981", "T-learner": "#f59e0b",
           "Causal-forest (2-model)": "#8b5cf6", "random": "#64748b"}
 
 
-@st.cache_data(show_spinner="Generating campaign A/B data…")
-def get_fit(n: int, seed: int, test_size: float):
-    data = make_synthetic(n=n, seed=seed)
+@st.cache_data(show_spinner="Loading experiment data…")
+def get_fit(dataset: str, n: int, seed: int, test_size: float):
+    if dataset.startswith("Hillstrom"):
+        try:
+            data = load_hillstrom()
+        except Exception:
+            st.sidebar.warning("Hillstrom download failed — using synthetic data.")
+            data = make_synthetic(n=n, seed=seed)
+    else:
+        data = make_synthetic(n=n, seed=seed)
     fit = fit_causal_models(data, seed=seed, test_size=test_size)
     report = causal_report(fit)
     curves = qini_curves_for_plot(fit)
@@ -44,7 +51,8 @@ def get_fit(n: int, seed: int, test_size: float):
 
 with st.sidebar:
     st.header("⚙️ A/B Experiment")
-    n = st.slider("Campaign cells (sample size)", 2000, 40000, 12000, 1000)
+    dataset = st.radio("Dataset", ["Hillstrom e-mail (real, 64k)", "Synthetic campaign A/B"])
+    n = st.slider("Sample size (synthetic only)", 2000, 40000, 12000, 1000)
     seed = st.number_input("Random seed", 0, 999, 42)
     test_size = st.slider("Holdout fraction", 0.15, 0.40, 0.25, 0.05)
     st.caption("Causal ML · Uplift")
@@ -53,7 +61,7 @@ st.title("🧪 UpliftIQ — Incremental Response Estimation")
 st.markdown("Estimate **CATE** with an **X-learner**, T-learner and two-model causal forest, "
             "then target the audience cells most responsive to the campaign variant.")
 
-fit, report, curves, data = get_fit(int(n), int(seed), float(test_size))
+fit, report, curves, data = get_fit(dataset, int(n), int(seed), float(test_size))
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Campaign cells", f"{data['n_samples']:,}")
@@ -79,17 +87,19 @@ with tab_t:
     rows = []
     for name, m in report["per_estimator"].items():
         td = m["te_distribution"]
-        rows.append({
+        row = {
             "Estimator": name,
             "normalized_qini": round(m["normalized_qini"], 6),
-            "spearman_vs_tau": round(m["spearman_vs_true_tau"], 4),
             "CATE_mean": round(td["mean"], 4),
             "CATE_std": round(td["std"], 4),
             "share_positive": f"{td['share_positive']:.1%}",
-        })
+        }
+        if "spearman_vs_true_tau" in m:
+            row["spearman_vs_tau"] = round(m["spearman_vs_true_tau"], 4)
+        rows.append(row)
     st.dataframe(pd.DataFrame(rows).set_index("Estimator"), use_container_width=True)
-    st.caption("normalized_qini > 0 ⇒ beats random targeting. spearman_vs_tau measures "
-               "CATE-ranking fidelity against the oracle effect.")
+    st.caption("normalized_qini > 0 ⇒ beats random targeting. spearman_vs_tau (synthetic only) "
+               "measures CATE-ranking fidelity against the oracle effect.")
 
 with tab_d:
     est_name = st.selectbox("Estimator", list(report["per_estimator"].keys()), index=0)

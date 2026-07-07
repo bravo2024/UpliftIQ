@@ -161,7 +161,9 @@ def fit_causal_models(data: dict, seed: int = 42, test_size: float = 0.25) -> di
     cat, num = data["categorical_features"], data["numerical_features"]
     X, y = data["X"], np.asarray(data["y"], dtype=float)
     w = np.asarray(data["treatment"], dtype=float)
-    true_tau = np.asarray(data["true_tau"], dtype=float)
+    true_tau = data.get("true_tau")
+    if true_tau is not None:
+        true_tau = np.asarray(true_tau, dtype=float)
 
     idx = np.arange(len(y))
     tr, te = train_test_split(idx, test_size=test_size, stratify=w, random_state=seed)
@@ -182,7 +184,7 @@ def fit_causal_models(data: dict, seed: int = 42, test_size: float = 0.25) -> di
         "X_train": Xtr, "X_test": Xte,
         "y_train": ytr, "y_test": yte,
         "treatment_train": wtr, "treatment_test": wte,
-        "true_tau_test": true_tau[te],
+        "true_tau_test": true_tau[te] if true_tau is not None else None,
         "cate_test": cate_test,
         "n_train": int(len(tr)), "n_test": int(len(te)),
         "categorical_features": list(cat),

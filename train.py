@@ -5,7 +5,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import argparse
 
-from src.data import make_synthetic
+from src.data import load_hillstrom, make_synthetic
 from src.model import fit_causal_models
 from src.evaluate import causal_report, save_metrics, print_report
 from src.persist import save_model
@@ -13,12 +13,21 @@ from src.persist import save_model
 
 def main():
     p = argparse.ArgumentParser(description="Train UpliftIQ causal effect estimators")
-    p.add_argument("--n", type=int, default=10000)
+    p.add_argument("--n", type=int, default=10000, help="rows for --synthetic")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--synthetic", action="store_true",
+                   help="use generated A/B data instead of downloading Hillstrom")
     a = p.parse_args()
 
-    data = make_synthetic(n=a.n, seed=a.seed)
-    print(f"{data['n_samples']:,} campaign-cells | conversion={data['positive_rate']:.2%} "
+    if a.synthetic:
+        data = make_synthetic(n=a.n, seed=a.seed)
+    else:
+        try:
+            data = load_hillstrom()
+        except Exception as e:
+            print(f"Hillstrom download failed ({e}), using synthetic data")
+            data = make_synthetic(n=a.n, seed=a.seed)
+    print(f"{data['n_samples']:,} rows | outcome rate={data['positive_rate']:.2%} "
           f"| treatment={data['treatment_rate']:.2%} | observed ATE={data['ate']:.4f}")
 
     fit = fit_causal_models(data, seed=a.seed)

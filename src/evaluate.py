@@ -16,25 +16,27 @@ def causal_report(fit_result: dict) -> dict:
     ttau = fit_result["true_tau_test"]
     per_estimator = {}
     for name, cate in fit_result["cate_test"].items():
-        rho = spearmanr(cate, ttau).correlation if len(ttau) > 2 else 0.0
-        if not np.isfinite(rho):
-            rho = 0.0
         per_estimator[name] = {
             "normalized_qini": normalized_qini(yte, wte, cate),
             "qini_area": float(normalized_qini(yte, wte, cate) * max(len(yte), 1)),
-            "spearman_vs_true_tau": float(rho),
             "te_distribution": treatment_effect_distribution_stats(cate),
             "decile_lift": uplift_decile_lift(yte, wte, cate),
         }
+        if ttau is not None:  # only synthetic data has an oracle effect
+            rho = spearmanr(cate, ttau).correlation if len(ttau) > 2 else 0.0
+            per_estimator[name]["spearman_vs_true_tau"] = float(rho) if np.isfinite(rho) else 0.0
     return {"per_estimator": per_estimator, "ate_observed": average_treatment_effect(yte, wte)}
 
 
 def qini_curves_for_plot(fit_result: dict, n_points: int = 100) -> dict:
     yte, wte = fit_result["y_test"], fit_result["treatment_test"]
-    out = {"random": np.linspace(0, _total(yte, wte), n_points)}
+    out = {}
     for name, cate in fit_result["cate_test"].items():
         _, q = qini_curve(yte, wte, cate, n_points=n_points)
         out[name] = q
+    # qini_curve prepends the origin, so match its length exactly
+    n = len(next(iter(out.values()))) if out else n_points
+    out["random"] = np.linspace(0, _total(yte, wte), n)
     return out
 
 
@@ -69,7 +71,8 @@ def print_report(report: dict) -> None:
     for name, m in report["per_estimator"].items():
         print(f"\n{'=' * 54}\n  {name}\n{'=' * 54}")
         print(f"  normalized_qini          : {m['normalized_qini']:.6f}")
-        print(f"  spearman vs true tau     : {m['spearman_vs_true_tau']:.4f}")
+        if "spearman_vs_true_tau" in m:
+            print(f"  spearman vs true tau     : {m['spearman_vs_true_tau']:.4f}")
         td = m["te_distribution"]
         print(f"  CATE mean/std            : {td['mean']:.4f} / {td['std']:.4f}")
         print(f"  CATE [min, q25, q50, q75, max]: "
